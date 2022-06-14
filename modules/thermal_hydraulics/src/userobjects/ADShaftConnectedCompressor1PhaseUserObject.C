@@ -30,7 +30,6 @@ ADShaftConnectedCompressor1PhaseUserObject::validParams()
   params.addParam<BoundaryName>("inlet", "Compressor inlet");
   params.addParam<BoundaryName>("outlet", "Compressor outlet");
   params.addRequiredParam<Point>("di_out", "Direction of connected outlet");
-  params.addRequiredParam<bool>("treat_as_turbine", "Treat the compressor as a turbine?");
   params.addRequiredParam<Real>("omega_rated", "Rated compressor speed [rad/s]");
   params.addRequiredParam<Real>("mdot_rated", "Rated compressor mass flow rate [kg/s]");
   params.addRequiredParam<Real>("rho0_rated",
@@ -76,7 +75,6 @@ ADShaftConnectedCompressor1PhaseUserObject::ADShaftConnectedCompressor1PhaseUser
     ADShaftConnectableUserObjectInterface(this),
 
     _di_out(getParam<Point>("di_out")),
-    _treat_as_turbine(getParam<bool>("treat_as_turbine")),
     _omega_rated(getParam<Real>("omega_rated")),
     _mdot_rated(getParam<Real>("mdot_rated")),
     _rho0_rated(getParam<Real>("rho0_rated")),
@@ -233,17 +231,8 @@ ADShaftConnectedCompressor1PhaseUserObject::computeFluxesAndResiduals(const unsi
     _Rp = std::max(_Rp_min, std::min(_Rp_max, _Rp));
 
     // Invert if treating as turbine
-    ADReal Rp_comp, eff_comp;
-    if (_treat_as_turbine)
-    {
-      Rp_comp = 1.0 / _Rp;
-      eff_comp = 1.0 / _eff;
-    }
-    else
-    {
-      Rp_comp = _Rp;
-      eff_comp = _eff;
-    }
+    ADReal Rp_comp = _Rp;
+    ADReal eff_comp = _eff;
 
     const ADReal p0_out = p0_in * Rp_comp;
     const ADReal rho0_out_isen = _fp.rho_from_p_s(p0_out, s_out);
