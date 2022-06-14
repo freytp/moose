@@ -15,6 +15,18 @@ alpha=1
     nx = 10
     ny = 4
   []
+  [right]
+    type = ParsedSubdomainMeshGenerator
+    input = gen
+    combinatorial_geometry = 'x > 2.5'
+    block_id = 1
+  []
+  [left]
+    type = ParsedSubdomainMeshGenerator
+    input = right
+    combinatorial_geometry = 'x < 2.5'
+    block_id = 2
+  []
 []
 
 [Variables]
@@ -22,17 +34,17 @@ alpha=1
   [vel_x]
     type = 'INSFVVelocityVariable'
     initial_condition = 1
-    block=0
+    block=1
   []
   [vel_y]
     type = 'INSFVVelocityVariable'
     initial_condition = 1
-    block=0
+    block=1
   []
   [pressure]
     type = 'INSFVPressureVariable'
     initial_condition = 0
-    block=0
+    block=1
   []
   [T_fluid]
     type = 'INSFVEnergyVariable'
@@ -49,6 +61,7 @@ alpha=1
     compressibility = 'incompressible'
     porous_medium_treatment = false
     add_energy_equation = true
+    add_scalar_equation = true
 
     passive_scalar_names = 'scalar'
 
@@ -83,6 +96,10 @@ alpha=1
 
     ambient_convection_alpha = 'alpha'
     ambient_temperature = '100'
+
+    friction_blocks = '1; 2'
+    friction_types = 'darcy; darcy'
+    friction_coeffs = '1.0; 1.0'
   []
 []
 
@@ -91,6 +108,11 @@ alpha=1
     type = ADGenericFunctorMaterial
     prop_names = 'cp k rho mu alpha'
     prop_values = '${cp} ${k} ${rho} ${mu} ${alpha}'
+  []
+  [kappa]
+    type = ADGenericVectorFunctorMaterial
+    prop_names = 'kappa'
+    prop_values = '1 1 1'
   []
 []
 

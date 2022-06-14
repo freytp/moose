@@ -24,6 +24,7 @@
 #include "libmesh/int_range.h"
 #include "metaphysicl/raw_type.h"
 #include "metaphysicl/metaphysicl_version.h"
+#include "metaphysicl/dualnumber_decl.h"
 #include "metaphysicl/dynamic_std_array_wrapper.h"
 #include "timpi/standard_type.h"
 
@@ -50,29 +51,6 @@ class Communicator;
 }
 }
 class MultiMooseEnum;
-namespace MetaPhysicL
-{
-#if METAPHYSICL_MAJOR_VERSION < 1
-template <typename, typename>
-class DualNumber;
-#else
-#include "metaphysicl/dualnumber_forward.h"
-#endif
-}
-namespace std
-{
-#if METAPHYSICL_MAJOR_VERSION < 1
-template <typename T, typename D>
-MetaPhysicL::DualNumber<T, D> abs(const MetaPhysicL::DualNumber<T, D> & in);
-template <typename T, typename D>
-MetaPhysicL::DualNumber<T, D> abs(MetaPhysicL::DualNumber<T, D> && in);
-#else
-template <typename T, typename D, bool asd>
-MetaPhysicL::DualNumber<T, D, asd> abs(const MetaPhysicL::DualNumber<T, D, asd> & in);
-template <typename T, typename D, bool asd>
-MetaPhysicL::DualNumber<T, D, asd> abs(MetaPhysicL::DualNumber<T, D, asd> && in);
-#endif
-}
 
 namespace MooseUtils
 {
@@ -87,6 +65,9 @@ pathjoin(const std::string & s, Args... args)
     return s + pathjoin(args...);
   return s + "/" + pathjoin(args...);
 }
+
+/// Check if the input string can be parsed into a Real
+bool parsesToReal(const std::string & input);
 
 /// Returns the location of either a local repo run_tests script - or an
 /// installed test executor script if run_tests isn't found.

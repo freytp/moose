@@ -53,10 +53,12 @@ NSFVAction::validParams()
       turbulence_type,
       "The way additional diffusivities are determined in the turbulent regime.");
 
+  params.addParam<bool>("add_flow_equations", true, "True to add mass and momentum equations");
   params.addParam<bool>("add_energy_equation", false, "True to add energy equation");
+  params.addParam<bool>("add_scalar_equation", false, "True to add advected scalar(s) equation");
 
-  params.addParamNamesToGroup("compressibility porous_medium_treatment "
-                              "turbulence_handling add_energy_equation",
+  params.addParamNamesToGroup("compressibility porous_medium_treatment turbulence_handling "
+                              "add_flow_equations add_energy_equation add_scalar_equation",
                               "General control");
 
   params.addParam<std::vector<std::string>>(
@@ -196,8 +198,14 @@ NSFVAction::validParams()
   params.addParam<FunctionName>(
       "initial_temperature", "300", "The initial temperature, assumed constant everywhere");
 
-  params.addParam<MooseFunctorName>(
-      "thermal_conductivity", NS::k, "The name of the fluid thermal conductivity");
+  params.addParam<std::vector<std::vector<SubdomainName>>>(
+      "thermal_conductivity_blocks",
+      "The blocks where the user wants define different thermal conductivities.");
+
+  params.addParam<std::vector<MooseFunctorName>>(
+      "thermal_conductivity",
+      std::vector<MooseFunctorName>({NS::k}),
+      "The name of the fluid thermal conductivity for each block");
 
   params.addParam<MooseFunctorName>("specific_heat", NS::cp, "The name of the specific heat");
 
@@ -220,9 +228,9 @@ NSFVAction::validParams()
       std::vector<FunctionName>(),
       "Functions for Dirichlet/Neumann boundaries in the energy equation.");
 
-  params.addParam<std::vector<SubdomainName>>(
+  params.addParam<std::vector<std::vector<SubdomainName>>>(
       "ambient_convection_blocks",
-      std::vector<SubdomainName>(),
+      std::vector<std::vector<SubdomainName>>(),
       "The blocks where the ambient convection is present.");
 
   params.addParam<std::vector<MooseFunctorName>>(
@@ -249,7 +257,7 @@ NSFVAction::validParams()
    * Parameters controlling the friction terms in case of porous medium simulations.
    */
 
-  params.addParam<std::vector<SubdomainName>>(
+  params.addParam<std::vector<std::vector<SubdomainName>>>(
       "friction_blocks",
       "The blocks where the friction factors are applied to emulate flow resistances.");
 
@@ -290,15 +298,17 @@ NSFVAction::validParams()
       std::vector<MooseFunctorName>(),
       "Functor names for the sources used for the passive scalar fields.");
 
-  params.addParam<CoupledName>(
+  params.addParam<std::vector<CoupledName>>(
       "passive_scalar_coupled_source",
-      std::vector<VariableName>(),
-      "Coupled variable names for the sources used for the passive scalar fields.");
+      std::vector<CoupledName>(),
+      "Coupled variable names for the sources used for the passive scalar fields. If multiple "
+      "sources for each equation are specified, major (outer) ordering by equation.");
 
-  params.addParam<std::vector<Real>>(
+  params.addParam<std::vector<std::vector<Real>>>(
       "passive_scalar_coupled_source_coeff",
-      std::vector<Real>(),
-      "Coupled variable multipliers for the sources used for the passive scalar fields.");
+      std::vector<std::vector<Real>>(),
+      "Coupled variable multipliers for the sources used for the passive scalar fields. If multiple"
+      " sources for each equation are specified, major (outer) ordering by equation.");
 
   MultiMooseEnum ps_inlet_types("fixed-value flux-mass flux-velocity", "fixed-value");
   params.addParam<MultiMooseEnum>(
@@ -450,9 +460,9 @@ NSFVAction::validParams()
 
   // Create input parameter groups
 
-  params.addParamNamesToGroup(
-      "dynamic_viscosity density thermal_expansion thermal_conductivity specific_heat",
-      "Material property");
+  params.addParamNamesToGroup("dynamic_viscosity density thermal_expansion "
+                              "thermal_conductivity_blocks thermal_conductivity specific_heat",
+                              "Material property");
 
   params.addParamNamesToGroup(
       "inlet_boundaries momentum_inlet_types momentum_inlet_function energy_inlet_types "
@@ -472,7 +482,9 @@ NSFVAction::NSFVAction(InputParameters parameters)
   : Action(parameters),
     _blocks(getParam<std::vector<SubdomainName>>("block")),
     _compressibility(getParam<MooseEnum>("compressibility")),
+    _has_flow_equations(getParam<bool>("add_flow_equations")),
     _has_energy_equation(getParam<bool>("add_energy_equation")),
+    _has_scalar_equation(getParam<bool>("add_scalar_equation")),
     _boussinesq_approximation(getParam<bool>("boussinesq_approximation")),
     _turbulence_handling(getParam<MooseEnum>("turbulence_handling")),
     _porous_medium_treatment(getParam<bool>("porous_medium_treatment")),
@@ -506,12 +518,13 @@ NSFVAction::NSFVAction(InputParameters parameters)
     _energy_wall_types(getParam<MultiMooseEnum>("energy_wall_types")),
     _energy_wall_function(getParam<std::vector<FunctionName>>("energy_wall_function")),
     _pressure_function(getParam<std::vector<FunctionName>>("pressure_function")),
-    _ambient_convection_blocks(getParam<std::vector<SubdomainName>>("ambient_convection_blocks")),
+    _ambient_convection_blocks(
+        getParam<std::vector<std::vector<SubdomainName>>>("ambient_convection_blocks")),
     _ambient_convection_alpha(getParam<std::vector<MooseFunctorName>>("ambient_convection_alpha")),
     _ambient_temperature(getParam<std::vector<MooseFunctorName>>("ambient_temperature")),
     _friction_blocks(isParamValid("friction_blocks")
-                         ? getParam<std::vector<SubdomainName>>("friction_blocks")
-                         : std::vector<SubdomainName>()),
+                         ? getParam<std::vector<std::vector<SubdomainName>>>("friction_blocks")
+                         : std::vector<std::vector<SubdomainName>>()),
     _friction_types(isParamValid("friction_types")
                         ? getParam<std::vector<std::vector<std::string>>>("friction_types")
                         : std::vector<std::vector<std::string>>()),
@@ -521,16 +534,21 @@ NSFVAction::NSFVAction(InputParameters parameters)
     _density_name(getParam<MooseFunctorName>("density")),
     _dynamic_viscosity_name(getParam<MooseFunctorName>("dynamic_viscosity")),
     _specific_heat_name(getParam<MooseFunctorName>("specific_heat")),
-    _thermal_conductivity_name(getParam<MooseFunctorName>("thermal_conductivity")),
+    _thermal_conductivity_blocks(
+        isParamValid("thermal_conductivity_blocks")
+            ? getParam<std::vector<std::vector<SubdomainName>>>("thermal_conductivity_blocks")
+            : std::vector<std::vector<SubdomainName>>()),
+    _thermal_conductivity_name(getParam<std::vector<MooseFunctorName>>("thermal_conductivity")),
     _thermal_expansion_name(getParam<MooseFunctorName>("thermal_expansion")),
     _passive_scalar_names(getParam<std::vector<NonlinearVariableName>>("passive_scalar_names")),
     _passive_scalar_diffusivity(
         getParam<std::vector<MooseFunctorName>>("passive_scalar_diffusivity")),
     _passive_scalar_schmidt_number(getParam<std::vector<Real>>("passive_scalar_schmidt_number")),
     _passive_scalar_source(getParam<std::vector<MooseFunctorName>>("passive_scalar_source")),
-    _passive_scalar_coupled_source(getParam<CoupledName>("passive_scalar_coupled_source")),
+    _passive_scalar_coupled_source(
+        getParam<std::vector<CoupledName>>("passive_scalar_coupled_source")),
     _passive_scalar_coupled_source_coeff(
-        getParam<std::vector<Real>>("passive_scalar_coupled_source_coeff")),
+        getParam<std::vector<std::vector<Real>>>("passive_scalar_coupled_source_coeff")),
     _passive_scalar_inlet_types(getParam<MultiMooseEnum>("passive_scalar_inlet_types")),
     _passive_scalar_inlet_function(
         getParam<std::vector<std::vector<std::string>>>("passive_scalar_inlet_function")),
@@ -603,7 +621,7 @@ NSFVAction::act()
     // Check if the user made mistakes in the definition of scalar kernel parameters
     checkPassiveScalarParameterErrors();
 
-    if (_compressibility == "incompressible" || _compressibility == "weakly-compressible")
+    if (_has_flow_equations)
     {
       if (_compressibility == "incompressible")
       {
@@ -626,19 +644,25 @@ NSFVAction::act()
             addWCNSEnergyTimeKernels();
         }
       }
+    }
 
+    if (_compressibility == "incompressible" || _compressibility == "weakly-compressible")
+    {
       // If the material properties are not constant, we can use the same kernels
       // for weakly-compressible simulations.
-      addINSMassKernels();
-      addINSMomentumAdvectionKernels();
-      addINSMomentumViscousDissipationKernels();
-      addINSMomentumPressureKernels();
-      addINSMomentumGravityKernels();
-      if (_friction_types.size())
-        addINSMomentumFrictionKernels();
+      if (_has_flow_equations)
+      {
+        addINSMassKernels();
+        addINSMomentumAdvectionKernels();
+        addINSMomentumViscousDissipationKernels();
+        addINSMomentumPressureKernels();
+        addINSMomentumGravityKernels();
+        if (_friction_types.size())
+          addINSMomentumFrictionKernels();
 
-      if (_turbulence_handling == "mixing-length")
-        addINSMomentumMixingLengthKernels();
+        if (_turbulence_handling == "mixing-length")
+          addINSMomentumMixingLengthKernels();
+      }
 
       if (_has_energy_equation)
       {
@@ -652,7 +676,7 @@ NSFVAction::act()
         if (_turbulence_handling == "mixing-length")
           addWCNSEnergyMixingLengthKernels();
       }
-      if (_passive_scalar_names.size())
+      if (_has_scalar_equation)
       {
         if (_problem->isTransient())
           addScalarTimeKernels();
@@ -676,14 +700,15 @@ NSFVAction::act()
     {
       addINSInletBC();
       addINSOutletBC();
-      addINSWallBC();
+      if (_has_flow_equations)
+        addINSWallBC();
       if (_has_energy_equation)
       {
         addINSEnergyInletBC();
         addINSEnergyWallBC();
       }
 
-      if (_passive_scalar_names.size())
+      if (_has_scalar_equation)
         addScalarInletBC();
     }
   }
@@ -779,7 +804,7 @@ NSFVAction::addINSVariables()
   }
 
   // Add passive scalar variables is needed
-  if (_passive_scalar_names.size())
+  if (_has_scalar_equation)
   {
     auto params = _factory.getValidParams("MooseVariableFVReal");
     params.set<std::vector<SubdomainName>>("block") = _blocks;
@@ -817,7 +842,6 @@ NSFVAction::addRhieChowUserObjects()
                                           ? getParam<unsigned short>("porosity_smoothing_layers")
                                           : 0;
     params.set<unsigned short>("smoothing_layers") = smoothing_layers;
-
     _problem->addUserObject("PINSFVRhieChowInterpolator", "pins_rhie_chow_interpolator", params);
   }
   else
@@ -828,6 +852,14 @@ NSFVAction::addRhieChowUserObjects()
       params.set<VariableName>(u_names[d]) = _velocity_name[d];
 
     params.set<VariableName>("pressure") = _pressure_name;
+    // Set RhieChow coefficients
+    if (!_has_flow_equations)
+    {
+      checkRhieChowFunctorsDefined();
+      params.set<MooseFunctorName>("a_u") = "ax";
+      params.set<MooseFunctorName>("a_v") = "ay";
+      params.set<MooseFunctorName>("a_w") = "az";
+    }
 
     _problem->addUserObject("INSFVRhieChowInterpolator", "ins_rhie_chow_interpolator", params);
   }
@@ -866,7 +898,7 @@ NSFVAction::addINSInitialConditions()
     }
   }
 
-  if (_passive_scalar_names.size())
+  if (_has_scalar_equation)
   {
     unsigned int ic_counter = 0;
     for (unsigned int name_i = 0; name_i < _passive_scalar_names.size(); ++name_i)
@@ -941,11 +973,9 @@ NSFVAction::addINSEnergyTimeKernels()
   if (_porous_medium_treatment)
   {
     params.set<MooseFunctorName>(NS::porosity) = _porosity_name;
-    if (_problem->hasFunctor(NS::time_deriv(_density_name),
-                             _problem->parameters().get<THREAD_ID>("_tid")))
+    if (_problem->hasFunctor(NS::time_deriv(_density_name), /*thread_id=*/0))
       params.set<MooseFunctorName>(NS::time_deriv(NS::density)) = NS::time_deriv(_density_name);
-    if (_problem->hasFunctor(NS::time_deriv(_specific_heat_name),
-                             _problem->parameters().get<THREAD_ID>("_tid")))
+    if (_problem->hasFunctor(NS::time_deriv(_specific_heat_name), /*thread_id=*/0))
       params.set<MooseFunctorName>(NS::time_deriv(NS::cp)) = NS::time_deriv(_specific_heat_name);
     params.set<bool>("is_solid") = false;
   }
@@ -953,9 +983,7 @@ NSFVAction::addINSEnergyTimeKernels()
   {
     // check if the name of the specific heat is just a constant, if it is,
     // we automatically assign a zero timederivative
-    std::istringstream ss(_specific_heat_name);
-    Real real_value;
-    if (ss >> real_value && ss.eof())
+    if (MooseUtils::parsesToReal(_specific_heat_name))
       params.set<MooseFunctorName>(NS::time_deriv(NS::cp)) = "0";
     else
       params.set<MooseFunctorName>(NS::time_deriv(NS::cp)) = NS::time_deriv(_specific_heat_name);
@@ -1252,11 +1280,14 @@ NSFVAction::addINSMomentumFrictionKernels()
       std::string block_name = "";
       if (num_friction_blocks)
       {
-        params.set<std::vector<SubdomainName>>("block") = {_friction_blocks[block_i]};
-        block_name = _friction_blocks[block_i];
+        params.set<std::vector<SubdomainName>>("block") = _friction_blocks[block_i];
+        block_name = Moose::stringify(_friction_blocks[block_i]);
       }
       else
+      {
         params.set<std::vector<SubdomainName>>("block") = _blocks;
+        block_name = std::to_string(block_i);
+      }
 
       for (unsigned int d = 0; d < _dim; ++d)
       {
@@ -1280,7 +1311,7 @@ NSFVAction::addINSMomentumFrictionKernels()
         const std::string correction_kernel_type = "PINSFVMomentumFrictionCorrection";
         InputParameters corr_params = _factory.getValidParams(correction_kernel_type);
         if (num_friction_blocks)
-          corr_params.set<std::vector<SubdomainName>>("block") = {_friction_blocks[block_i]};
+          corr_params.set<std::vector<SubdomainName>>("block") = _friction_blocks[block_i];
         else
           corr_params.set<std::vector<SubdomainName>>("block") = _blocks;
         corr_params.set<MooseFunctorName>(NS::density) = _density_name;
@@ -1320,11 +1351,14 @@ NSFVAction::addINSMomentumFrictionKernels()
       std::string block_name = "";
       if (num_friction_blocks)
       {
-        params.set<std::vector<SubdomainName>>("block") = {_friction_blocks[block_i]};
-        block_name = _friction_blocks[block_i];
+        params.set<std::vector<SubdomainName>>("block") = _friction_blocks[block_i];
+        block_name = Moose::stringify(_friction_blocks[block_i]);
       }
       else
+      {
         params.set<std::vector<SubdomainName>>("block") = _blocks;
+        block_name = std::to_string(block_i);
+      }
 
       for (unsigned int d = 0; d < _dim; ++d)
       {
@@ -1372,26 +1406,47 @@ NSFVAction::addINSEnergyAdvectionKernels()
 void
 NSFVAction::addINSEnergyHeatConductionKernels()
 {
-  if (_porous_medium_treatment)
-  {
-    const std::string kernel_type = "PINSFVEnergyDiffusion";
-    InputParameters params = _factory.getValidParams(kernel_type);
-    params.set<NonlinearVariableName>("variable") = _fluid_temperature_name;
-    params.set<std::vector<SubdomainName>>("block") = _blocks;
-    params.set<MooseFunctorName>(NS::k) = _thermal_conductivity_name;
-    params.set<MooseFunctorName>(NS::porosity) = _porosity_name;
+  bool vector_conductivity = processThermalConductivity();
+  unsigned int num_blocks = _thermal_conductivity_blocks.size();
+  unsigned int num_used_blocks = num_blocks ? num_blocks : 1;
 
-    _problem->addFVKernel(kernel_type, "pins_energy_diffusion", params);
-  }
-  else
+  for (unsigned int block_i = 0; block_i < num_used_blocks; ++block_i)
   {
-    const std::string kernel_type = "FVDiffusion";
-    InputParameters params = _factory.getValidParams(kernel_type);
-    params.set<NonlinearVariableName>("variable") = _fluid_temperature_name;
-    params.set<std::vector<SubdomainName>>("block") = _blocks;
-    params.set<MooseFunctorName>("coeff") = _thermal_conductivity_name;
+    std::string block_name = "";
+    if (num_blocks)
+      block_name = Moose::stringify(_thermal_conductivity_blocks[block_i]);
+    else
+      block_name = std::to_string(block_i);
 
-    _problem->addFVKernel(kernel_type, "ins_energy_diffusion", params);
+    if (_porous_medium_treatment)
+    {
+      const std::string kernel_type =
+          vector_conductivity ? "PINSFVEnergyAnisotropicDiffusion" : "PINSFVEnergyDiffusion";
+
+      InputParameters params = _factory.getValidParams(kernel_type);
+      params.set<NonlinearVariableName>("variable") = _fluid_temperature_name;
+      std::vector<SubdomainName> block_names =
+          num_blocks ? _thermal_conductivity_blocks[block_i] : _blocks;
+      params.set<std::vector<SubdomainName>>("block") = block_names;
+
+      std::string conductivity_name = vector_conductivity ? NS::kappa : NS::k;
+      params.set<MooseFunctorName>(conductivity_name) = _thermal_conductivity_name[block_i];
+      params.set<MooseFunctorName>(NS::porosity) = _porosity_name;
+
+      _problem->addFVKernel(kernel_type, "pins_energy_diffusion_" + block_name, params);
+    }
+    else
+    {
+      const std::string kernel_type = "FVDiffusion";
+      InputParameters params = _factory.getValidParams(kernel_type);
+      params.set<NonlinearVariableName>("variable") = _fluid_temperature_name;
+      std::vector<SubdomainName> block_names =
+          num_blocks ? _thermal_conductivity_blocks[block_i] : _blocks;
+      params.set<std::vector<SubdomainName>>("block") = block_names;
+      params.set<MooseFunctorName>("coeff") = _thermal_conductivity_name[block_i];
+
+      _problem->addFVKernel(kernel_type, "ins_energy_diffusion_" + block_name, params);
+    }
   }
 }
 
@@ -1412,11 +1467,14 @@ NSFVAction::addINSEnergyAmbientConvection()
     std::string block_name = "";
     if (num_convection_blocks)
     {
-      params.set<std::vector<SubdomainName>>("block") = {_ambient_convection_blocks[block_i]};
-      block_name = _ambient_convection_blocks[block_i];
+      params.set<std::vector<SubdomainName>>("block") = _ambient_convection_blocks[block_i];
+      block_name = Moose::stringify(_ambient_convection_blocks[block_i]);
     }
     else
+    {
       params.set<std::vector<SubdomainName>>("block") = _blocks;
+      block_name = std::to_string(block_i);
+    }
 
     params.set<MooseFunctorName>("h_solid_fluid") = _ambient_convection_alpha[block_i];
     params.set<MooseFunctorName>(NS::T_solid) = _ambient_temperature[block_i];
@@ -1516,17 +1574,22 @@ NSFVAction::addScalarSourceKernels()
 void
 NSFVAction::addScalarCoupledSourceKernels()
 {
-  for (unsigned int name_i = 0; name_i < _passive_scalar_names.size(); ++name_i)
+  for (unsigned int name_eq = 0; name_eq < _passive_scalar_names.size(); name_eq++)
   {
-    const std::string kernel_type = "FVCoupledForce";
-    InputParameters params = _factory.getValidParams(kernel_type);
-    params.set<NonlinearVariableName>("variable") = _passive_scalar_names[name_i];
-    params.set<std::vector<SubdomainName>>("block") = _blocks;
-    params.set<CoupledName>("v") = {_passive_scalar_coupled_source[name_i]};
-    params.set<Real>("coef") = _passive_scalar_coupled_source_coeff[name_i];
+    for (unsigned int i = 0; i < _passive_scalar_coupled_source[name_eq].size(); ++i)
+    {
+      const std::string kernel_type = "FVCoupledForce";
+      InputParameters params = _factory.getValidParams(kernel_type);
+      params.set<NonlinearVariableName>("variable") = _passive_scalar_names[name_eq];
+      params.set<std::vector<SubdomainName>>("block") = _blocks;
+      params.set<CoupledName>("v") = {_passive_scalar_coupled_source[name_eq][i]};
+      params.set<Real>("coef") = _passive_scalar_coupled_source_coeff[name_eq][i];
 
-    _problem->addFVKernel(
-        kernel_type, "ins_" + _passive_scalar_names[name_i] + "_coupled_source", params);
+      _problem->addFVKernel(kernel_type,
+                            "ins_" + _passive_scalar_names[name_eq] + "_coupled_source_" +
+                                std::to_string(i),
+                            params);
+    }
   }
 }
 
@@ -2148,6 +2211,49 @@ NSFVAction::processVariables()
                      ") supplied to the NavierStokesFV action does not exist!");
 }
 
+bool
+NSFVAction::processThermalConductivity()
+{
+  checkBlockwiseConsistency<MooseFunctorName>("thermal_conductivity_blocks",
+                                              {"thermal_conductivity"});
+  bool have_scalar = false;
+  bool have_vector = false;
+
+  for (unsigned int i = 0; i < _thermal_conductivity_name.size(); ++i)
+  {
+    // First, check if the name is just a number (only in case of isotropic conduction)
+    if (MooseUtils::parsesToReal(_thermal_conductivity_name[i]))
+      have_scalar = true;
+    // Now we determine what kind of functor we are dealing with
+    else
+    {
+      if (_problem->hasFunctorWithType<ADReal>(_thermal_conductivity_name[i], /*thread_id=*/0))
+        have_scalar = true;
+      else
+      {
+        if (_problem->hasFunctorWithType<ADRealVectorValue>(_thermal_conductivity_name[i],
+                                                            /*thread_id=*/0))
+          have_vector = true;
+        else
+        {
+          paramError("thermal_conductivity",
+                     "We only allow functor of type ADReal or ADRealVectorValue for thermal "
+                     "conductivity!");
+        }
+      }
+    }
+  }
+
+  if (have_vector && !_porous_medium_treatment)
+    paramError("thermal_conductivity", "Cannot use anistropic diffusion with non-porous flows!");
+
+  if (have_vector == have_scalar)
+    paramError("thermal_conductivity",
+               "The entries on thermal conductivity shall either be scalars of vectors, mixing "
+               "them is not supported!");
+  return have_vector;
+}
+
 void
 NSFVAction::checkGeneralControlErrors()
 {
@@ -2162,6 +2268,10 @@ NSFVAction::checkGeneralControlErrors()
   if (!_porous_medium_treatment && _use_friction_correction)
     paramError("use_friction_correction",
                "This parameter should not be defined if the porous medium treatment is disabled!");
+
+  if (_porous_medium_treatment && _has_scalar_equation)
+    paramError("porous_medium_treatment",
+               "Porous media scalar advection is currently unimplemented!");
 
   if (isParamValid("consistent_scaling") && !_use_friction_correction)
     paramError("consistent_scaling",
@@ -2178,6 +2288,7 @@ NSFVAction::checkGeneralControlErrors()
                                   "energy_wall_types",
                                   "energy_advection_interpolation",
                                   "specific_heat",
+                                  "thermal_conductivity_blocks",
                                   "thermal_conductivity"});
   if (!_porous_medium_treatment)
     checkDependentParameterError(
@@ -2192,9 +2303,10 @@ NSFVAction::checkGeneralControlErrors()
                                   "von_karman_const",
                                   "von_karman_const_0"});
 
-  if (!_passive_scalar_names.size())
-    checkDependentParameterError("passive_scalar_names",
-                                 {"passive_scalar_source",
+  if (!_has_scalar_equation)
+    checkDependentParameterError("add_scalar_equation",
+                                 {"passive_scalar_names",
+                                  "passive_scalar_source",
                                   "passive_scalar_scaling",
                                   "passive_scalar_diffusivity",
                                   "passive_scalar_inlet_types",
@@ -2233,15 +2345,15 @@ NSFVAction::checkICParameterErrors()
 void
 NSFVAction::checkBoundaryParameterErrors()
 {
-  if (_outlet_boundaries.size() > 0 && (_outlet_boundaries.size() != _momentum_outlet_types.size()))
+  if (_outlet_boundaries.size() != _momentum_outlet_types.size())
     paramError("momentum_outlet_types",
                "Size is not the same as the number of outlet boundaries in 'outlet_boundaries'");
 
-  if (_wall_boundaries.size() > 0 && (_wall_boundaries.size() != _momentum_wall_types.size()))
+  if (_wall_boundaries.size() > 0 && _wall_boundaries.size() != _momentum_wall_types.size())
     paramError("momentum_wall_types",
                "Size is not the same as the number of wall boundaries in 'wall_boundaries'");
 
-  if (_inlet_boundaries.size() > 0 && (_inlet_boundaries.size() != _momentum_inlet_types.size()))
+  if (_inlet_boundaries.size() != _momentum_inlet_types.size())
     paramError("momentum_inlet_types",
                "Size is not the same as the number of inlet boundaries in 'inlet_boundaries'");
 
@@ -2271,26 +2383,26 @@ NSFVAction::checkBoundaryParameterErrors()
         _momentum_outlet_types[enum_ind] == "fixed-pressure-zero-gradient")
       num_pressure_outlets += 1;
 
-  if (_outlet_boundaries.size() > 0 && _pressure_function.size() != num_pressure_outlets)
+  if (_pressure_function.size() != num_pressure_outlets)
     paramError("pressure_function",
                "Size is not the same as the number of pressure outlet boundaries!");
 
-  if (_compressibility == "incompressible")
+  if (_compressibility == "incompressible" && _has_flow_equations)
     if (num_pressure_outlets == 0 && !(getParam<bool>("pin_pressure")))
       mooseError("The pressure must be fixed for an incompressible simulation! Try setting "
                  "pin_pressure or change the compressibility settings!");
 
   if (_has_energy_equation)
   {
-    if (_inlet_boundaries.size() > 0 && (_inlet_boundaries.size() != _energy_inlet_types.size()))
+    if (_inlet_boundaries.size() != _energy_inlet_types.size())
       paramError("energy_inlet_types",
                  "Size is not the same as the number of inlet boundaries in 'inlet_boundaries'");
 
-    if (_inlet_boundaries.size() > 0 && _energy_inlet_types.size() != _energy_inlet_function.size())
+    if (_energy_inlet_types.size() != _energy_inlet_function.size())
       paramError("energy_inlet_function",
                  "Size is not the same as the number of boundaries in 'energy_inlet_types'");
 
-    if (_wall_boundaries.size() > 0 && (_wall_boundaries.size() != _energy_wall_types.size()))
+    if (_wall_boundaries.size() != _energy_wall_types.size())
       paramError("energy_wall_types",
                  "Size is not the same as the number of wall boundaries in 'wall_boundaries'");
 
@@ -2307,15 +2419,13 @@ NSFVAction::checkBoundaryParameterErrors()
                      "'energy_wall_types' (" +
                      std::to_string(num_fixed_energy_walls) + ")");
   }
-  if (_passive_scalar_names.size())
+  if (_has_scalar_equation)
   {
-    if (_inlet_boundaries.size() > 0 &&
-        (_inlet_boundaries.size() != _passive_scalar_inlet_types.size()))
+    if (_inlet_boundaries.size() != _passive_scalar_inlet_types.size())
       paramError("passive_scalar_inlet_types",
                  "Size is not the same as the number of inlet boundaries in 'inlet_boundaries'");
 
-    if (_inlet_boundaries.size() > 0 &&
-        _passive_scalar_inlet_types.size() != _passive_scalar_inlet_function.size())
+    if (_passive_scalar_inlet_types.size() != _passive_scalar_inlet_function.size())
       paramError(
           "passive_scalar_inlet_function",
           "Size is not the same as the number of boundaries in 'passive_scalar_inlet_types'");
@@ -2337,12 +2447,17 @@ NSFVAction::checkFrictionParameterErrors()
 {
   checkBlockwiseConsistency<std::vector<std::string>>("friction_blocks",
                                                       {"friction_types", "friction_coeffs"});
-
   for (unsigned int block_i = 0; block_i < _friction_types.size(); ++block_i)
     if (_friction_types[block_i].size() != _friction_coeffs[block_i].size())
     {
+      std::string block_name = "";
+      if (_friction_blocks.size())
+        block_name = Moose::stringify(_friction_blocks[block_i]);
+      else
+        block_name = std::to_string(block_i);
+
       paramError("friction_coeffs",
-                 "The number of friction coefficients for block: " + _friction_blocks[block_i] +
+                 "The number of friction coefficients for block(s): " + block_name +
                      " is not the same as the number of requested friction types!");
     }
 
@@ -2355,9 +2470,17 @@ NSFVAction::checkFrictionParameterErrors()
     {
       unsigned int c = std::count(ft.begin(), ft.end(), name);
       if (c > 1)
+      {
+        std::string block_name = "";
+        if (_friction_blocks.size())
+          block_name = Moose::stringify(_friction_blocks[block_i]);
+        else
+          block_name = std::to_string(block_i);
+
         paramError("friction_types",
-                   "The following keyword: " + name + " appeared more than once in block " +
-                       std::to_string(block_i) + " of 'friction_types'.");
+                   "The following keyword: " + name + " appeared more than once in block(s) " +
+                       block_name + " of 'friction_types'.");
+      }
     }
   }
 }
@@ -2389,12 +2512,20 @@ NSFVAction::checkPassiveScalarParameterErrors()
     if (_passive_scalar_coupled_source.size() != _passive_scalar_names.size())
       paramError("passive_scalar_coupled_source",
                  "The number of coupled sources defined is not equal to the number of passive "
-                 "scalar fields!");
+                 "scalar fields! Did you forget semicolons in the vector input?");
 
     if (_passive_scalar_coupled_source_coeff.size() != _passive_scalar_names.size())
       paramError("passive_scalar_coupled_source_coeff",
-                 "The number of coupled sources coefficients defined is not equal to the number of "
-                 "passive scalar fields!");
+                 "The number of coupled sources coefficients defined is not equal to the "
+                 "number of passive scalar fields! Did you forget semicolons in the vector input?");
+    for (unsigned int i = 0; i < _passive_scalar_coupled_source.size(); i++)
+    {
+      if (_passive_scalar_coupled_source[i].size() !=
+          _passive_scalar_coupled_source_coeff[i].size())
+        paramError("passive_scalar_coupled_source_coeff",
+                   "The number of coupled sources coefficients defined is not equal to the number "
+                   "of coupled sources! Did you forget semicolons in the vector input?");
+    }
   }
 }
 
@@ -2407,4 +2538,18 @@ NSFVAction::checkDependentParameterError(const std::string main_parameter,
       paramError(param,
                  "This parameter should not be given by the user with the corresponding " +
                      main_parameter + " setting!");
+}
+
+void
+NSFVAction::checkRhieChowFunctorsDefined()
+{
+  if (!_problem->hasFunctor("ax", /*thread_id=*/0))
+    paramError("add_flow_equations",
+               "Rhie Chow coefficient ax must be provided for advection by auxiliary velocities");
+  if (_dim >= 2 && !_problem->hasFunctor("ay", /*thread_id=*/0))
+    paramError("add_flow_equations",
+               "Rhie Chow coefficient ay must be provided for advection by auxiliary velocities");
+  if (_dim == 3 && !_problem->hasFunctor("az", /*thread_id=*/0))
+    paramError("add_flow_equations",
+               "Rhie Chow coefficient az must be provided for advection by auxiliary velocities");
 }
